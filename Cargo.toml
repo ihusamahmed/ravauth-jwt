@@ -1,0 +1,30 @@
+[package]
+name = "ravauth-jwt"
+version = "0.1.0"
+edition = "2024"
+authors = ["Hossam Ahmed <ihusamahmed@gmail.com>"]
+description = "Zero-trust JWT library — secure by design, no parser bugs, no logic bugs"
+license = "Apache-2.0"
+repository = "https://github.com/ihusamahmed/ravauth-jwt"
+homepage = "https://github.com/ihusamahmed/ravauth-jwt"
+documentation = "https://docs.rs/ravauth-jwt"
+readme = "README.md"
+keywords = ["jwt", "security", "authentication", "zero-trust", "ed25519"]
+categories = ["authentication", "cryptography", "web-programming"]
+rust-version = "1.85"
+
+[dependencies]
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+[workspace]
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
