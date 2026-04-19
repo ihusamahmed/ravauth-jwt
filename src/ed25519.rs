@@ -54,17 +54,9 @@ pub struct Ed25519SigningKey {
     kid: Option<String>,
 }
 
-impl Drop for Ed25519SigningKey {
-    fn drop(&mut self) {
-        // Zeroize the signing key bytes
-        let mut bytes = self.inner.to_bytes();
-        bytes.zeroize();
-        // Overwrite inner with a dummy key derived from zeroed bytes
-        // (the zeroed bytes are already overwritten, but this ensures
-        //  the struct's memory is not holding the original key)
-        self.inner = SigningKey::from_bytes(&[0u8; 32]);
-    }
-}
+// No manual Drop needed — `SigningKey` implements `ZeroizeOnDrop` (via the
+// `zeroize` feature on `ed25519-dalek`), so the internal key material is
+// automatically zeroed when this struct is dropped.
 
 impl Clone for Ed25519SigningKey {
     fn clone(&self) -> Self {
@@ -106,13 +98,17 @@ impl Ed25519SigningKey {
     }
 
     /// Attach a key ID (`kid`) for key rotation support.
-    pub fn with_kid(mut self, kid: impl Into<String>) -> Self {
-        self.kid = Some(kid.into());
-        self
+    ///
+    /// # Errors
+    /// Returns `ClaimValidation` if `kid` is empty, too long, or contains invalid characters.
+    pub fn with_kid(mut self, kid: impl Into<String>) -> Result<Self, JwtError> {
+        let kid = kid.into();
+        crate::header::Header::validate_kid(&kid)?;
+        self.kid = Some(kid);
+        Ok(self)
     }
 
-    /// Export the raw 32-byte secret key.
-    ///
+    /// Export the raw 32-byte secret key.    ///
     /// # Security
     /// The returned bytes are **not** automatically zeroized. The caller MUST
     /// ensure they are zeroized after use (e.g., with `zeroize::Zeroize`).
@@ -213,9 +209,14 @@ impl Ed25519VerifyingKey {
     }
 
     /// Attach a key ID (`kid`) for key rotation support.
-    pub fn with_kid(mut self, kid: impl Into<String>) -> Self {
-        self.kid = Some(kid.into());
-        self
+    ///
+    /// # Errors
+    /// Returns `ClaimValidation` if `kid` is empty, too long, or contains invalid characters.
+    pub fn with_kid(mut self, kid: impl Into<String>) -> Result<Self, JwtError> {
+        let kid = kid.into();
+        crate::header::Header::validate_kid(&kid)?;
+        self.kid = Some(kid);
+        Ok(self)
     }
 
     /// Export the raw 32-byte public key.
@@ -386,7 +387,7 @@ mod tests {
 
     #[test]
     fn kid_in_header() {
-        let sk = Ed25519SigningKey::generate().with_kid("ed-key-v1");
+        let sk = Ed25519SigningKey::generate().with_kid("ed-key-v1").unwrap();
         let c = claims(3600);
         let token = sk.sign(&c).unwrap();
         let v: TestClaims = sk.verify(&token, &ValidationConfig::default()).unwrap();

@@ -21,6 +21,7 @@ impl Algorithm {
 /// JWT header. Only fields we produce are serialized.
 /// Dangerous fields are deserialized only so we can reject them.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Header {
     pub alg: String,
     pub typ: String,
@@ -41,6 +42,25 @@ pub(crate) struct Header {
 }
 
 impl Header {
+    /// Validate a `kid` value. Returns an error if invalid.
+    /// Used both during signing (in `with_kid()`) and verification (in `validate()`).
+    pub(crate) fn validate_kid(kid: &str) -> Result<(), JwtError> {
+        if kid.is_empty() || kid.len() > 256 {
+            return Err(JwtError::ClaimValidation(
+                "kid: must be 1-256 characters".into(),
+            ));
+        }
+        if !kid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
+        {
+            return Err(JwtError::ClaimValidation(
+                "kid: contains invalid characters (allowed: alphanumeric, -, _, ., :)".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a new JWT header with the given algorithm.
     pub fn new(alg: Algorithm, kid: Option<String>) -> Self {
         Self {
@@ -91,23 +111,8 @@ impl Header {
         }
 
         // Validate kid — prevent injection attacks via kid field.
-        // kid is often used in database lookups or file paths by consumers.
-        // Restrict to safe characters: alphanumeric, hyphens, underscores, dots, colons.
-        // Max 256 chars to prevent DoS.
         if let Some(ref kid) = self.kid {
-            if kid.is_empty() || kid.len() > 256 {
-                return Err(JwtError::ClaimValidation(
-                    "kid: must be 1-256 characters".into(),
-                ));
-            }
-            if !kid
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
-            {
-                return Err(JwtError::ClaimValidation(
-                    "kid: contains invalid characters (allowed: alphanumeric, -, _, ., :)".into(),
-                ));
-            }
+            Self::validate_kid(kid)?;
         }
 
         // Algorithm check — must match the expected algorithm exactly

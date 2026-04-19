@@ -126,7 +126,7 @@ impl ValidationConfig {
             .expect("system clock before UNIX epoch")
             .as_secs() as i64;
 
-        // exp is mandatory — must be a non-negative numeric value
+        // exp is mandatory — must be a non-negative integer value
         let exp = match payload.get("exp") {
             Some(v) => {
                 if let Some(i) = v.as_i64() {
@@ -136,19 +136,9 @@ impl ValidationConfig {
                         ));
                     }
                     i
-                } else if let Some(f) = v.as_f64() {
-                    // Accept numeric floats but truncate to integer
-                    // Reject NaN, Infinity, negative zero edge cases
-                    if f.is_finite() && f >= 0.0 && f <= i64::MAX as f64 {
-                        f as i64
-                    } else {
-                        return Err(JwtError::ClaimValidation(
-                            "exp: numeric value out of range".into(),
-                        ));
-                    }
                 } else {
                     return Err(JwtError::ClaimValidation(
-                        "exp: expected numeric value".into(),
+                        "exp: expected integer value".into(),
                     ));
                 }
             }
@@ -168,17 +158,9 @@ impl ValidationConfig {
                     ));
                 }
                 i
-            } else if let Some(f) = nbf_val.as_f64() {
-                if f.is_finite() && f >= 0.0 && f <= i64::MAX as f64 {
-                    f as i64
-                } else {
-                    return Err(JwtError::ClaimValidation(
-                        "nbf: numeric value out of range".into(),
-                    ));
-                }
             } else {
                 return Err(JwtError::ClaimValidation(
-                    "nbf: expected numeric value".into(),
+                    "nbf: expected integer value".into(),
                 ));
             };
 
@@ -187,47 +169,41 @@ impl ValidationConfig {
             }
         }
 
-        // iat + max_age validation
-        if let Some(max_age) = self.max_age_secs {
-            match payload.get("iat") {
-                Some(v) => {
-                    let iat = if let Some(i) = v.as_i64() {
-                        if i < 0 {
-                            return Err(JwtError::ClaimValidation(
-                                "iat: numeric value out of range".into(),
-                            ));
-                        }
-                        i
-                    } else if let Some(f) = v.as_f64() {
-                        if f.is_finite() && f >= 0.0 && f <= i64::MAX as f64 {
-                            f as i64
-                        } else {
-                            return Err(JwtError::ClaimValidation(
-                                "iat: numeric value out of range".into(),
-                            ));
-                        }
-                    } else {
-                        return Err(JwtError::ClaimValidation(
-                            "iat: expected numeric value".into(),
-                        ));
-                    };
-
-                    let age = now.saturating_sub(iat);
-                    if age > max_age.saturating_add(self.leeway_secs) {
-                        return Err(JwtError::ClaimValidation(format!(
-                            "token too old: issued {}s ago, max age {}s",
-                            age, max_age
-                        )));
-                    }
-                    // Also reject tokens with iat in the future (beyond leeway)
-                    if iat > now.saturating_add(self.leeway_secs) {
-                        return Err(JwtError::ClaimValidation(
-                            "iat: issued in the future".into(),
-                        ));
-                    }
+        // iat sanity validation — always validate when present, regardless of max_age
+        if let Some(iat_val) = payload.get("iat") {
+            let iat = if let Some(i) = iat_val.as_i64() {
+                if i < 0 {
+                    return Err(JwtError::ClaimValidation(
+                        "iat: numeric value out of range".into(),
+                    ));
                 }
-                None => return Err(JwtError::MissingClaim("iat")),
+                i
+            } else {
+                return Err(JwtError::ClaimValidation(
+                    "iat: expected integer value".into(),
+                ));
+            };
+
+            // Reject tokens with iat in the future (beyond leeway)
+            if iat > now.saturating_add(self.leeway_secs) {
+                return Err(JwtError::ClaimValidation(
+                    "iat: issued in the future".into(),
+                ));
             }
+
+            // max_age check (only when configured)
+            if let Some(max_age) = self.max_age_secs {
+                let age = now.saturating_sub(iat);
+                if age > max_age.saturating_add(self.leeway_secs) {
+                    return Err(JwtError::ClaimValidation(format!(
+                        "token too old: issued {}s ago, max age {}s",
+                        age, max_age
+                    )));
+                }
+            }
+        } else if self.max_age_secs.is_some() {
+            // iat is required when max_age is configured
+            return Err(JwtError::MissingClaim("iat"));
         }
 
         // Required claims

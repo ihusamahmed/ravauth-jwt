@@ -70,9 +70,14 @@ impl HmacKey {
 
     /// Attach a key ID (`kid`) for key rotation support.
     /// The `kid` will be included in the JWT header.
-    pub fn with_kid(mut self, kid: impl Into<String>) -> Self {
-        self.kid = Some(kid.into());
-        self
+    ///
+    /// # Errors
+    /// Returns `ClaimValidation` if `kid` is empty, too long, or contains invalid characters.
+    pub fn with_kid(mut self, kid: impl Into<String>) -> Result<Self, JwtError> {
+        let kid = kid.into();
+        Header::validate_kid(&kid)?;
+        self.kid = Some(kid);
+        Ok(self)
     }
 
     /// Sign claims and produce a compact JWS token string.
@@ -256,7 +261,7 @@ mod tests {
 
     #[test]
     fn kid_in_header() {
-        let k = key().with_kid("key-v1");
+        let k = key().with_kid("key-v1").unwrap();
         let c = claims(3600);
         let token = k.sign(&c).unwrap();
         let v: TestClaims = k.verify(&token, &ValidationConfig::default()).unwrap();
@@ -908,7 +913,7 @@ mod tests {
 
     #[test]
     fn accept_valid_kid() {
-        let k = key().with_kid("key-v1.2_prod:primary");
+        let k = key().with_kid("key-v1.2_prod:primary").unwrap();
         let c = claims(3600);
         let token = k.sign(&c).unwrap();
         let r: Result<TestClaims, _> = k.verify(&token, &ValidationConfig::default());
@@ -1005,5 +1010,142 @@ mod tests {
         let sig = mac.finalize().into_bytes();
         let sig_b64 = URL_SAFE_NO_PAD.encode(sig);
         format!("{}.{}", signing_input, sig_b64)
+    }
+
+    // ── Unknown Header Fields (deny_unknown_fields) ──
+
+    #[test]
+    fn reject_unknown_header_field_x5t() {
+        let k = key();
+        let c = claims(3600);
+        let token = k.sign(&c).unwrap();
+        let tampered = inject_header(&token, "x5t", "\"thumbprint\"");
+        let r: Result<TestClaims, _> = k.verify(&tampered, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject unknown header field x5t");
+    }
+
+    #[test]
+    fn reject_unknown_header_field_b64() {
+        let k = key();
+        let c = claims(3600);
+        let token = k.sign(&c).unwrap();
+        let tampered = inject_header(&token, "b64", "true");
+        let r: Result<TestClaims, _> = k.verify(&tampered, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject unknown header field b64");
+    }
+
+    #[test]
+    fn reject_custom_vendor_header() {
+        let k = key();
+        let c = claims(3600);
+        let token = k.sign(&c).unwrap();
+        let tampered = inject_header(&token, "x-custom", "\"value\"");
+        let r: Result<TestClaims, _> = k.verify(&tampered, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject custom vendor header");
+    }
+
+    // ── kid Validation on sign() Path ──
+
+    #[test]
+    fn reject_kid_sql_injection_on_sign() {
+        let r = key().with_kid("key' OR '1'='1");
+        assert!(r.is_err(), "with_kid should reject SQL injection");
+    }
+
+    #[test]
+    fn reject_kid_path_traversal_on_sign() {
+        let r = key().with_kid("../../etc/passwd");
+        assert!(r.is_err(), "with_kid should reject path traversal");
+    }
+
+    #[test]
+    fn reject_kid_empty_on_sign() {
+        let r = key().with_kid("");
+        assert!(r.is_err(), "with_kid should reject empty kid");
+    }
+
+    // ── Float Temporal Claim Rejection ──
+
+    #[test]
+    fn reject_float_exp() {
+        let k = key();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "exp": 9.223372036854776e18
+        });
+        let token = sign_raw_payload(&k, &payload);
+        let r: Result<serde_json::Value, _> = k.verify(&token, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject float exp");
+    }
+
+    #[test]
+    fn reject_float_nbf() {
+        let k = key();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "exp": now() + 3600,
+            "nbf": 1.5
+        });
+        let token = sign_raw_payload(&k, &payload);
+        let r: Result<serde_json::Value, _> = k.verify(&token, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject float nbf");
+    }
+
+    #[test]
+    fn reject_float_iat() {
+        let k = key();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "exp": now() + 3600,
+            "iat": 1.5
+        });
+        let token = sign_raw_payload(&k, &payload);
+        let r: Result<serde_json::Value, _> = k.verify(&token, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject float iat");
+    }
+
+    // ── iat Validation Without max_age ──
+
+    #[test]
+    fn reject_future_iat_without_max_age() {
+        let k = key();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "exp": now() + 7200,
+            "iat": now() + 3600
+        });
+        let token = sign_raw_payload(&k, &payload);
+        // No max_age configured — iat should still be validated
+        let r: Result<serde_json::Value, _> = k.verify(&token, &ValidationConfig::default());
+        assert!(r.is_err(), "should reject future iat even without max_age");
+    }
+
+    #[test]
+    fn reject_negative_iat_without_max_age() {
+        let k = key();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "exp": now() + 3600,
+            "iat": -100
+        });
+        let token = sign_raw_payload(&k, &payload);
+        let r: Result<serde_json::Value, _> = k.verify(&token, &ValidationConfig::default());
+        assert!(
+            r.is_err(),
+            "should reject negative iat even without max_age"
+        );
+    }
+
+    #[test]
+    fn accept_valid_iat_without_max_age() {
+        let k = key();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "exp": now() + 3600,
+            "iat": now() - 60
+        });
+        let token = sign_raw_payload(&k, &payload);
+        let r: Result<serde_json::Value, _> = k.verify(&token, &ValidationConfig::default());
+        assert!(r.is_ok(), "should accept valid iat without max_age");
     }
 }
